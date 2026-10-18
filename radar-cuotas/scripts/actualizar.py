@@ -96,6 +96,14 @@ def num(v):
         return None
 
 
+def dec(v):
+    try:
+        x = float(v)
+        return x if x > 1 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def read_results() -> dict[str, list]:
     hist: dict[str, list] = {}
     for div in LEAGUES:
@@ -109,7 +117,11 @@ def read_results() -> dict[str, list]:
                 d, h, a = iso(r.get("Date", "")), (r.get("HomeTeam") or "").strip(), (r.get("AwayTeam") or "").strip()
                 hg, ag = num(r.get("FTHG")), num(r.get("FTAG"))
                 if d and h and a and hg is not None and ag is not None:
-                    rows.append([d, h, a, hg, ag, num(r.get("HS")), num(r.get("AS")), num(r.get("HST")), num(r.get("AST"))])
+                    row = [d, h, a, hg, ag, num(r.get("HS")), num(r.get("AS")), num(r.get("HST")), num(r.get("AST"))]
+                    close = [dec(r.get(k)) for k in ("AvgCH", "AvgCD", "AvgCA", "AvgC>2.5", "AvgC<2.5")]
+                    if any(close):
+                        row += close
+                    rows.append(row)
         if rows:
             hist[div] = sorted(rows)
     return hist
@@ -231,6 +243,62 @@ def download_odds(hist: dict, avisos: list[str], getter=requests.get) -> tuple[l
     return fixtures, unmatched, remaining
 
 
+# Marcadores del mismo día (football-data tarda 1-3 días en publicar los resultados)
+ESPN = {"E0": "eng.1", "E1": "eng.2", "E2": "eng.3", "E3": "eng.4", "EC": "eng.5", "SC0": "sco.1", "SC1": "sco.2",
+        "SC2": "sco.3", "SC3": "sco.4", "D1": "ger.1", "D2": "ger.2", "I1": "ita.1", "I2": "ita.2", "SP1": "esp.1",
+        "SP2": "esp.2", "F1": "fra.1", "F2": "fra.2", "N1": "ned.1", "B1": "bel.1", "P1": "por.1", "T1": "tur.1", "G1": "gre.1"}
+ESPN_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/{code}/scoreboard"
+
+
+def espn_results(hist: dict, avisos: list[str], getter=requests.get, days: int = 3) -> int:
+    """Añade al histórico los partidos terminados en los últimos días que football-data aún no tiene.
+    Solo se aceptan equipos emparejados sin ambigüedad; ante la duda, el partido se ignora."""
+    aliases = json.loads(ALIASES_FILE.read_text(encoding="utf-8")) if ALIASES_FILE.exists() else {}
+    today = datetime.now(MADRID).date()
+    added, fails = 0, 0
+    for div, code in ESPN.items():
+        rows = hist.get(div, [])
+        known = sorted({t for r in rows if r[0] >= "2025-07-01" for t in r[1:3]})
+        if not known:
+            continue
+        for k in range(days + 1):
+            day = today - timedelta(days=k)
+            try:
+                r = getter(ESPN_URL.format(code=code), params={"dates": day.strftime("%Y%m%d")}, headers=UA, timeout=20)
+                if r.status_code != 200:
+                    fails += 1
+                    continue
+                events = r.json().get("events", [])
+            except (requests.RequestException, ValueError):
+                fails += 1
+                continue
+            for ev in events:
+                try:
+                    comp = ev["competitions"][0]
+                    if not (comp.get("status") or ev.get("status"))["type"].get("completed"):
+                        continue
+                    side = {c["homeAway"]: c for c in comp["competitors"]}
+                    names = lambda c: [c["team"].get(x) for x in ("displayName", "shortDisplayName", "name") if c["team"].get(x)]  # noqa: E731
+                    h = next((t for n in names(side["home"]) if (t := match_team(n, known, aliases))), None)
+                    a = next((t for n in names(side["away"]) if (t := match_team(n, known, aliases))), None)
+                    if not h or not a or h == a:
+                        continue
+                    d = datetime.fromisoformat(ev["date"].replace("Z", "+00:00")).astimezone(MADRID).strftime("%Y-%m-%d")
+                    hg, ag = int(side["home"]["score"]), int(side["away"]["score"])
+                except (KeyError, ValueError, TypeError, IndexError):
+                    continue
+                dup = any(r[1] == h and r[2] == a and abs((datetime.fromisoformat(r[0]) - datetime.fromisoformat(d)).days) <= 3 for r in rows[-400:])
+                if not dup:
+                    rows.append([d, h, a, hg, ag, None, None, None, None])
+                    added += 1
+            time.sleep(0.2)
+        rows.sort()
+    if fails > 20:
+        avisos.append(f"Marcadores del día: {fails} consultas fallidas; algunas apuestas se liquidarán cuando football-data publique los resultados.")
+    log(f"  marcadores del día añadidos: {added}")
+    return added
+
+
 def fd_fixtures(avisos: list[str], getter=requests.get) -> list[dict]:
     """Próximos partidos con cuotas de football-data (Bet365, Pinnacle, media y máxima). Horas en hora británica."""
     try:
@@ -282,10 +350,22 @@ def main() -> int:
     log("1/3 Resultados de football-data")
     download_results(avisos)
     hist = read_results()
+    espn_results(hist, avisos)
     log("2/3 Próximos partidos y cuotas")
     base = fd_fixtures(avisos)
-    api, unmatched, remaining = download_odds(hist, avisos)
+    if os.environ.get("SOLO_RESULTADOS"):
+        api, unmatched, remaining = [], [], None
+        log("  ejecución de resultados: no se consultan cuotas (no gasta créditos)")
+    else:
+        api, unmatched, remaining = download_odds(hist, avisos)
     # las cuotas de la API son del momento; las de football-data se publican antes de cada jornada
+    if os.environ.get("SOLO_RESULTADOS") and OUT.exists():
+        try:
+            prev = json.loads(OUT.read_text(encoding="utf-8"))
+            api = [f for f in prev.get("fixtures", []) if f.get("src") == "the-odds-api"]
+            remaining = prev.get("creditos_restantes")
+        except ValueError:
+            pass
     seen = {(f["div"], f["home"], f["away"]) for f in api}
     fixtures = api + [f for f in base if (f["div"], f["home"], f["away"]) not in seen]
     log(f"  football-data: {len(base)} partidos · The Odds API: {len(api)} partidos")
