@@ -1027,7 +1027,14 @@ function factsFor(a, c) {
   }
   if (["LO05", "LO15"].includes(c) && H.n >= 3) neu.push(`${f.home} marca en casa ${num(H.gf / H.n, 1)} goles por partido; ${f.away} recibe fuera ${V.n ? num(V.ga / V.n, 1) : "—"}`);
   if (["VO05", "VO15"].includes(c) && V.n >= 3) neu.push(`${f.away} marca fuera ${num(V.gf / V.n, 1)} goles por partido; ${f.home} recibe en casa ${H.n ? num(H.ga / H.n, 1) : "—"}`);
-  for (const sg of a.signals) neu.push(sg.txt);
+  // señales de tiros: si el equipo al que apuestas ha tenido suerte (marca más / encaja menos de lo que generan los tiros), juega en contra
+  const backs = ["H", "1X"].includes(c) ? f.home : ["A", "X2"].includes(c) ? f.away : null;
+  for (const sg of a.signals) {
+    if (!backs) { neu.push(sg.txt); continue; }
+    const lucky = sg.type === "ataque_caliente" || sg.type === "defensa_suerte";
+    const good = sg.team === backs ? !lucky : lucky;
+    (good ? fav : con).push(sg.txt + (lucky ? " Sus resultados son mejores de lo que indican los tiros." : " Sus resultados son peores de lo que indican los tiros."));
+  }
   for (const t of (a.trends ? a.trends.items : [])) neu.push(t.txt);
   const h2h = (S.hist[f.div] || []).filter((r) => ((r[1] === f.home && r[2] === f.away) || (r[1] === f.away && r[2] === f.home)) && r[0] < f.date).slice(-4);
   if (h2h.length) neu.push(`Últimos enfrentamientos (poco predictivos): ${h2h.map((r) => `${r[1]} ${r[3]}-${r[4]} ${r[2]}`).join(" · ")}`);
@@ -1063,7 +1070,7 @@ function betAnalysisCard(r, withAdd = true) {
 
 /* ------------------------------------------------ montador de combinadas */
 const UI = {target: 2, dayFrom: "", dayTo: "", minLegs: 1, maxLegs: 4, mk1x2: true, mkGoals: true, mkOther: false, noOdds: false, res: null,
-            an: {fid: "", c: "H", o: ""}, anRes: null};
+            an: {fid: "", c: "H", o: "", country: "", div: "", day: ""}, anRes: null};
 const MK_GROUP = {"1X2": "mk1x2", Doble: "mk1x2", Goles: "mkGoals", Ambos: "mkOther", Equipo: "mkOther"};
 function buildCombos() {
   const T = Math.max(1.05, +UI.target || 2);
@@ -1122,9 +1129,20 @@ function vMontador() {
       : `<div class="card empty">No hay forma de llegar a esa cuota con los partidos y mercados elegidos. Prueba otro día, más partidos o más mercados.</div>`;
   }
   // analizador
-  const opts = A.filter((a) => a.ok).sort((x, y) => (x.f.date + x.f.time).localeCompare(y.f.date + y.f.time));
+  const okA = A.filter((a) => a.ok);
+  const cty = (a) => COUNTRY[a.f.div] || a.f.div;
+  const countries = [...new Set(okA.map(cty))].sort();
+  const leagues = [...new Set(okA.filter((a) => !UI.an.country || cty(a) === UI.an.country).map((a) => a.f.div))].sort((x, y) => (LEAGUES[x] || x).localeCompare(LEAGUES[y] || y));
+  const adays = [...new Set(okA.map((a) => a.f.date))].sort();
+  const opts = okA.filter((a) => (!UI.an.country || cty(a) === UI.an.country) && (!UI.an.div || a.f.div === UI.an.div) && (!UI.an.day || a.f.date === UI.an.day))
+    .sort((x, y) => (x.f.date + x.f.time).localeCompare(y.f.date + y.f.time));
+  const o_ = (v, cur, l) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(l)}</option>`;
   h += `<h2>Analizar mi apuesta</h2><div class="card">
-   <div class="setting"><label for="a_m">Partido</label><select id="a_m" data-an="fid" style="max-width:220px"><option value="">Elige…</option>${opts.map((a) => `<option value="${esc(a.f.id)}" ${a.f.id === UI.an.fid ? "selected" : ""}>${fdate(a.f.date, {day: "numeric", month: "short"})} · ${esc(a.f.home)} – ${esc(a.f.away)}</option>`).join("")}</select></div>
+   <div class="filters2">
+    <select data-an="country" aria-label="País">${o_("", UI.an.country, "Todos los países")}${countries.map((c) => o_(c, UI.an.country, c)).join("")}</select>
+    <select data-an="div" aria-label="Liga">${o_("", UI.an.div, "Todas las ligas")}${leagues.map((d) => o_(d, UI.an.div, LEAGUES[d] || d)).join("")}</select>
+    <select data-an="day" aria-label="Día" style="grid-column:1/3">${o_("", UI.an.day, "Todos los días")}${adays.map((d) => o_(d, UI.an.day, fdate(d, {weekday: "long", day: "numeric", month: "short"}))).join("")}</select></div>
+   <div class="setting"><label for="a_m">Partido</label><select id="a_m" data-an="fid" style="max-width:220px"><option value="">${opts.length ? `Elige entre ${opts.length} partidos…` : "Ningún partido con estos filtros"}</option>${opts.map((a) => `<option value="${esc(a.f.id)}" ${a.f.id === UI.an.fid ? "selected" : ""}>${fdate(a.f.date, {day: "numeric", month: "short"})} ${esc(a.f.time || "")} · ${esc(a.f.home)} – ${esc(a.f.away)}</option>`).join("")}</select></div>
    <div class="setting"><label for="a_c">Mercado</label><select id="a_c" data-an="c">${MARKETS.map(([c, l]) => `<option value="${c}" ${c === UI.an.c ? "selected" : ""}>${l}</option>`).join("")}</select></div>
    <div class="setting"><label for="a_o">Cuota de tu casa<small>Opcional: si la dejas vacía uso la del mercado.</small></label><input id="a_o" data-an="o" type="number" step="0.01" min="1.01" inputmode="decimal" value="${esc(UI.an.o)}"></div>
    <div class="btns"><button class="primary" data-analyze>Analizar</button></div></div>`;
@@ -1537,7 +1555,12 @@ if (HAS_DOM) document.addEventListener("change", async (e) => {
   const el = e.target;
   if (el.dataset && el.dataset.pf) { PF[el.dataset.pf] = el.value; if (el.dataset.pf === "country") PF.div = ""; render(); return; }
   if (el.dataset && el.dataset.ui) { UI[el.dataset.ui] = el.type === "checkbox" ? el.checked : el.value; return; }
-  if (el.dataset && el.dataset.an) { UI.an[el.dataset.an] = el.value; return; }
+  if (el.dataset && el.dataset.an) {
+    const k = el.dataset.an; UI.an[k] = el.value;
+    if (k === "country") UI.an.div = "";
+    if (["country", "div", "day"].includes(k)) { UI.an.fid = ""; const y = window.scrollY; render(); window.scrollTo(0, y); }
+    return;
+  }
   if (el.dataset && el.dataset.typed) {
     const v = parseFloat(String(el.value).replace(",", "."));
     if (isFinite(v) && v > 1) S.typed[el.dataset.typed] = v; else delete S.typed[el.dataset.typed];
