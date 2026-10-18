@@ -30,12 +30,18 @@ RAW = ROOT / "datos" / "raw"
 OUT = ROOT / "datos" / "datos.json"
 MADRID = ZoneInfo("Europe/Madrid")
 
-# liga de football-data -> clave de The Odds API
-LEAGUES = {
+# Todas las ligas principales de football-data (resultados, tiros y cuotas gratis)
+LEAGUES = ["E0", "E1", "E2", "E3", "EC", "SC0", "SC1", "SC2", "SC3", "D1", "D2", "I1", "I2",
+           "SP1", "SP2", "F1", "F2", "N1", "B1", "P1", "T1", "G1"]
+# Ligas que además se consultan en The Odds API (cuotas del día). Cada una gasta 2 créditos por ejecución;
+# el resto usa el archivo gratuito de próximos partidos de football-data.
+ODDS_API = {
     "E0": "soccer_epl", "E1": "soccer_efl_champ", "SP1": "soccer_spain_la_liga",
     "SP2": "soccer_spain_segunda_division", "D1": "soccer_germany_bundesliga",
     "I1": "soccer_italy_serie_a", "F1": "soccer_france_ligue_one",
 }
+FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
+LONDON = ZoneInfo("Europe/London")
 SEASONS = ["2425", "2526", "2627"]           # la última es la temporada en curso
 FD_URL = "https://www.football-data.co.uk/mmz4281/{season}/{div}.csv"
 ODDS_URL = "https://api.the-odds-api.com/v4/sports/{sport}/odds"
@@ -98,7 +104,7 @@ def read_results() -> dict[str, list]:
             path = RAW / f"{div}_{season}.csv"
             if not path.exists():
                 continue
-            text = path.read_bytes().decode("latin-1")
+            text = path.read_bytes().decode("latin-1").lstrip("\ufeff").lstrip("ï»¿")
             for r in csv.DictReader(io.StringIO(text)):
                 d, h, a = iso(r.get("Date", "")), (r.get("HomeTeam") or "").strip(), (r.get("AwayTeam") or "").strip()
                 hg, ag = num(r.get("FTHG")), num(r.get("FTAG"))
@@ -203,7 +209,7 @@ def download_odds(hist: dict, avisos: list[str], getter=requests.get) -> tuple[l
     now = datetime.now(timezone.utc)
     fixtures, unmatched, remaining = [], [], None
     fallback = builtin_teams()
-    for div, sport in LEAGUES.items():
+    for div, sport in ODDS_API.items():
         params = {"apiKey": key, "regions": "eu", "markets": "h2h,totals", "oddsFormat": "decimal", "dateFormat": "iso"}
         try:
             r = getter(ODDS_URL.format(sport=sport), params=params, timeout=30)
@@ -225,13 +231,64 @@ def download_odds(hist: dict, avisos: list[str], getter=requests.get) -> tuple[l
     return fixtures, unmatched, remaining
 
 
+def fd_fixtures(avisos: list[str], getter=requests.get) -> list[dict]:
+    """Próximos partidos con cuotas de football-data (Bet365, Pinnacle, media y máxima). Horas en hora británica."""
+    try:
+        r = getter(FIXTURES_URL, headers=UA, timeout=30)
+        ok = r.status_code == 200 and b"HomeTeam" in r.content[:400]
+    except requests.RequestException:
+        ok = False
+    if not ok:
+        avisos.append("No se pudo descargar el archivo de próximos partidos de football-data.")
+        return []
+    today = datetime.now(MADRID).strftime("%Y-%m-%d")
+    out = []
+    text = r.content.decode("latin-1").lstrip("\ufeff").lstrip("ï»¿")  # quita la marca BOM que rompe la columna Div
+    for row in csv.DictReader(io.StringIO(text)):
+        div = (row.get("Div") or "").strip()
+        d = iso(row.get("Date", ""))
+        h, a = (row.get("HomeTeam") or "").strip(), (row.get("AwayTeam") or "").strip()
+        if div not in LEAGUES or not d or not h or not a:
+            continue
+        hhmm = (row.get("Time") or "12:00").strip()
+        try:
+            uk = datetime.strptime(f"{d} {hhmm}", "%Y-%m-%d %H:%M").replace(tzinfo=LONDON)
+        except ValueError:
+            uk = datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=LONDON)
+        local = uk.astimezone(MADRID)
+        date = local.strftime("%Y-%m-%d")
+        if date < today:
+            continue
+        def g(k):
+            try:
+                v = float(row.get(k) or "")
+                return v if v > 1 else None
+            except ValueError:
+                return None
+        odds = {}
+        for name, p1, pt in (("B365", "B365", "B365"), ("PS", "PS", "P"), ("Avg", "Avg", "Avg"), ("Max", "Max", "Max")):
+            e = {k: v for k, v in (("H", g(p1 + "H")), ("D", g(p1 + "D")), ("A", g(p1 + "A")),
+                                   ("O25", g(pt + ">2.5")), ("U25", g(pt + "<2.5"))) if v}
+            if e:
+                odds[name] = e
+        if odds:
+            out.append({"id": f"{div}|{date}|{h}|{a}", "div": div, "date": date, "time": local.strftime("%H:%M"),
+                        "home": h, "away": a, "odds": odds, "src": "football-data"})
+    return out
+
+
 def main() -> int:
     avisos: list[str] = []
     log("1/3 Resultados de football-data")
     download_results(avisos)
     hist = read_results()
-    log("2/3 Cuotas de The Odds API")
-    fixtures, unmatched, remaining = download_odds(hist, avisos)
+    log("2/3 Próximos partidos y cuotas")
+    base = fd_fixtures(avisos)
+    api, unmatched, remaining = download_odds(hist, avisos)
+    # las cuotas de la API son del momento; las de football-data se publican antes de cada jornada
+    seen = {(f["div"], f["home"], f["away"]) for f in api}
+    fixtures = api + [f for f in base if (f["div"], f["home"], f["away"]) not in seen]
+    log(f"  football-data: {len(base)} partidos · The Odds API: {len(api)} partidos")
     log("3/3 Escribiendo datos/datos.json")
     OUT.parent.mkdir(parents=True, exist_ok=True)
     data = {"generado": datetime.now(timezone.utc).isoformat(), "hist": hist, "fixtures": fixtures,
