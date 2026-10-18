@@ -27,17 +27,17 @@ jobs:
       - name: Descargar resultados y cuotas
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-        run: python scripts/actualizar.py
+        run: python radar-cuotas/scripts/actualizar.py
       - name: Guardar datos en el repositorio
         run: |
           git config user.name "radar-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add datos
+          git add radar-cuotas/datos
           git commit -m "Datos $(date -u +%Y-%m-%d)" || echo "Sin cambios"
           git push
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: radar-cuotas
 
   publicar:
     needs: actualizar
