@@ -28,6 +28,8 @@ jobs:
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: python radar-cuotas/scripts/actualizar.py
+      - name: Simulador
+        run: node radar-cuotas/scripts/simular.js
       - name: Guardar datos en el repositorio
         run: |
           git config user.name "radar-bot"
