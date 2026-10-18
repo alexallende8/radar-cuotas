@@ -36,10 +36,15 @@ LEAGUES = ["E0", "E1", "E2", "E3", "EC", "SC0", "SC1", "SC2", "SC3", "D1", "D2",
 # Ligas que además se consultan en The Odds API (cuotas del día). Cada una gasta 2 créditos por ejecución;
 # el resto usa el archivo gratuito de próximos partidos de football-data.
 ODDS_API = {
-    "E0": "soccer_epl", "E1": "soccer_efl_champ", "SP1": "soccer_spain_la_liga",
-    "SP2": "soccer_spain_segunda_division", "D1": "soccer_germany_bundesliga",
+    "E0": "soccer_epl", "SP1": "soccer_spain_la_liga", "D1": "soccer_germany_bundesliga",
     "I1": "soccer_italy_serie_a", "F1": "soccer_france_ligue_one",
 }
+# Competiciones europeas: resultados y calendario de ESPN; cuotas de The Odds API solo en semanas con partidos.
+EURO_ESPN = {"UCL": "uefa.champions", "UEL": "uefa.europa", "UECL": "uefa.europa.conf"}
+EURO_ODDS = {"UCL": "soccer_uefa_champs_league", "UEL": "soccer_uefa_europa_league",
+             "UECL": "soccer_uefa_europa_conference_league"}
+EURO_FILE = RAW / "europa.json"
+SEASON_START = "2026-07-01"
 FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
 LONDON = ZoneInfo("Europe/London")
 SEASONS = ["2425", "2526", "2627"]           # la última es la temporada en curso
@@ -299,6 +304,108 @@ def espn_results(hist: dict, avisos: list[str], getter=requests.get, days: int =
     return added
 
 
+def espn_day(code: str, day, getter=requests.get) -> list[dict]:
+    r = getter(ESPN_URL.format(code=code), params={"dates": day.strftime("%Y%m%d")}, headers=UA, timeout=20)
+    if r.status_code != 200:
+        raise requests.RequestException(f"HTTP {r.status_code}")
+    out = []
+    for ev in r.json().get("events", []):
+        try:
+            comp = ev["competitions"][0]
+            side = {c["homeAway"]: c for c in comp["competitors"]}
+            st = (comp.get("status") or ev.get("status"))["type"]
+            start = datetime.fromisoformat(ev["date"].replace("Z", "+00:00")).astimezone(MADRID)
+            out.append({"date": start.strftime("%Y-%m-%d"), "time": start.strftime("%H:%M"),
+                        "home": side["home"]["team"]["displayName"], "away": side["away"]["team"]["displayName"],
+                        "done": bool(st.get("completed")),
+                        "hg": int(side["home"].get("score") or 0), "ag": int(side["away"].get("score") or 0)})
+        except (KeyError, ValueError, TypeError, IndexError):
+            continue
+    return out
+
+
+def europe(hist: dict, avisos: list[str], getter=requests.get) -> tuple[dict, list]:
+    """Resultados de la temporada europea (acumulados en datos/raw/europa.json) y próximos partidos."""
+    store = json.loads(EURO_FILE.read_text(encoding="utf-8")) if EURO_FILE.exists() else {"rows": {}, "hasta": None}
+    today = datetime.now(MADRID).date()
+    start = datetime.fromisoformat(store.get("hasta") or SEASON_START).date() - timedelta(days=4)
+    fixtures, fails = [], 0
+    for div, code in EURO_ESPN.items():
+        rows = {(r[0], r[1], r[2]): r for r in store["rows"].get(div, [])}
+        day = start
+        while day <= today + timedelta(days=10):
+            try:
+                for m in espn_day(code, day, getter):
+                    if m["done"]:
+                        rows[(m["date"], m["home"], m["away"])] = [m["date"], m["home"], m["away"], m["hg"], m["ag"], None, None, None, None]
+                    elif day >= today:
+                        fixtures.append({"div": div, **m})
+            except (requests.RequestException, ValueError):
+                fails += 1
+            day += timedelta(days=1)
+            time.sleep(0.15)
+        store["rows"][div] = sorted(rows.values())
+    store["hasta"] = today.isoformat()
+    EURO_FILE.write_text(json.dumps(store, ensure_ascii=False), encoding="utf-8")
+    if fails > 10:
+        avisos.append(f"Competiciones europeas: {fails} consultas a ESPN fallidas.")
+    for div in EURO_ESPN:
+        hist[div] = store["rows"].get(div, [])
+    log(f"  Europa: {sum(len(v) for v in store['rows'].values())} resultados, {len(fixtures)} próximos partidos")
+    return hist, fixtures
+
+
+def domestic_map(name: str, hist: dict, aliases: dict) -> dict | None:
+    """Liga y nombre doméstico (football-data) de un equipo europeo, si juega en una de nuestras 22 ligas."""
+    hits = []
+    for div in LEAGUES:
+        known = sorted({t for r in hist.get(div, []) if r[0] >= "2025-07-01" for t in r[1:3]})
+        t = match_team(name, known, aliases)
+        if t:
+            hits.append({"div": div, "name": t})
+    return hits[0] if len(hits) == 1 else None
+
+
+def euro_fixtures(hist: dict, efx: list, avisos: list[str], getter=requests.get) -> tuple[list, str | None]:
+    aliases = json.loads(ALIASES_FILE.read_text(encoding="utf-8")) if ALIASES_FILE.exists() else {}
+    key = os.environ.get("ODDS_API_KEY", "").strip()
+    soon = datetime.now(MADRID).date() + timedelta(days=3)
+    remaining, priced = None, {}
+    if os.environ.get("SOLO_RESULTADOS") and OUT.exists():   # ejecución nocturna: se conservan las cuotas de la mañana
+        try:
+            for f in json.loads(OUT.read_text(encoding="utf-8")).get("fixtures", []):
+                if f.get("div") in EURO_ESPN and f.get("odds"):
+                    priced[(f["div"], f["home"], f["away"])] = f["odds"]
+        except ValueError:
+            pass
+    if key and not os.environ.get("SOLO_RESULTADOS"):
+        for div, sport in EURO_ODDS.items():
+            if not any(f["div"] == div and f["date"] <= soon.isoformat() for f in efx):
+                continue                                   # sin partidos cerca: no se gastan créditos
+            try:
+                r = getter(ODDS_URL.format(sport=sport), params={"apiKey": key, "regions": "eu", "markets": "h2h,totals",
+                           "oddsFormat": "decimal", "dateFormat": "iso"}, timeout=30)
+            except requests.RequestException as exc:
+                avisos.append(f"The Odds API no respondió para {div}: {exc}")
+                continue
+            remaining = r.headers.get("x-requests-remaining", remaining)
+            if r.status_code != 200:
+                avisos.append(f"The Odds API devolvió {r.status_code} para {div}")
+                continue
+            names = sorted({t for f in efx if f["div"] == div for t in (f["home"], f["away"])})
+            for ev in r.json():
+                fx, _ = parse_event(ev, div, names, aliases, datetime.now(timezone.utc))
+                if fx:
+                    priced[(div, fx["home"], fx["away"])] = fx["odds"]
+    out = []
+    for f in efx:
+        dom = {"home": domestic_map(f["home"], hist, aliases), "away": domestic_map(f["away"], hist, aliases)}
+        out.append({"id": f"{f['div']}|{f['date']}|{f['home']}|{f['away']}", "div": f["div"], "date": f["date"], "time": f["time"],
+                    "home": f["home"], "away": f["away"], "odds": priced.get((f["div"], f["home"], f["away"]), {}),
+                    "src": "espn+the-odds-api", "dom": dom})
+    return out, remaining
+
+
 def fd_fixtures(avisos: list[str], getter=requests.get) -> list[dict]:
     """Próximos partidos con cuotas de football-data (Bet365, Pinnacle, media y máxima). Horas en hora británica."""
     try:
@@ -351,6 +458,11 @@ def main() -> int:
     download_results(avisos)
     hist = read_results()
     espn_results(hist, avisos)
+    try:
+        hist, efx = europe(hist, avisos)
+    except Exception as exc:  # una caída de ESPN no debe parar el resto
+        avisos.append(f"Competiciones europeas no disponibles: {exc}")
+        efx = []
     log("2/3 Próximos partidos y cuotas")
     base = fd_fixtures(avisos)
     if os.environ.get("SOLO_RESULTADOS"):
@@ -368,6 +480,12 @@ def main() -> int:
             pass
     seen = {(f["div"], f["home"], f["away"]) for f in api}
     fixtures = api + [f for f in base if (f["div"], f["home"], f["away"]) not in seen]
+    try:
+        eu, rem2 = euro_fixtures(hist, efx, avisos)
+        fixtures += eu
+        remaining = rem2 or remaining
+    except Exception as exc:
+        avisos.append(f"Cuotas europeas no disponibles: {exc}")
     log(f"  football-data: {len(base)} partidos · The Odds API: {len(api)} partidos")
     log("3/3 Escribiendo datos/datos.json")
     OUT.parent.mkdir(parents=True, exist_ok=True)
