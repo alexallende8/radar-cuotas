@@ -3,7 +3,7 @@
 Secretos necesarios en GitHub (Settings > Secrets and variables > Actions):
   GMAIL_USER          tu dirección de Gmail (la que envía)
   GMAIL_APP_PASSWORD  «contraseña de aplicación» de 16 letras (no tu contraseña normal)
-  AVISO_EMAIL         opcional: a quién enviarlo (por defecto, a ti mismo)
+  AVISO_EMAIL         opcional: a quién enviarlo; varias direcciones separadas por comas (por defecto, a ti mismo)
 Si faltan, el script no envía nada y no da error.
 """
 from __future__ import annotations
@@ -102,7 +102,7 @@ def build(sim: dict, feed: dict, now: datetime) -> tuple[str, str]:
 
 def main() -> int:
     user, pwd = os.environ.get("GMAIL_USER", "").strip(), os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "")
-    to = os.environ.get("AVISO_EMAIL", "").strip() or user
+    to = [x.strip() for x in os.environ.get("AVISO_EMAIL", "").replace(";", ",").split(",") if x.strip()] or [user]
     sim_p, feed_p = ROOT / "datos" / "simulador.json", ROOT / "datos" / "datos.json"
     sim = json.loads(sim_p.read_text(encoding="utf-8")) if sim_p.exists() else {}
     feed = json.loads(feed_p.read_text(encoding="utf-8")) if feed_p.exists() else {}
@@ -111,12 +111,12 @@ def main() -> int:
         print("Sin GMAIL_USER / GMAIL_APP_PASSWORD: no se envía correo.\n" + subject)
         return 0
     msg = MIMEMultipart("alternative")
-    msg["Subject"], msg["From"], msg["To"] = subject, user, to
+    msg["Subject"], msg["From"], msg["To"] = subject, user, ", ".join(to)
     msg.attach(MIMEText(html, "html", "utf-8"))
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
         s.login(user, pwd)
-        s.sendmail(user, [to], msg.as_string())
-    print(f"Correo enviado a {to}: {subject}")
+        s.sendmail(user, to, msg.as_string())
+    print(f"Correo enviado a {', '.join(to)}: {subject}")
     return 0
 
 
