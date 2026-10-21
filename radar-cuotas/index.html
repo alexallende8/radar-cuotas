@@ -954,7 +954,13 @@ function vMine() {
   const cor = S.mine.filter((b) => b.tipo === "corazonada"), real = S.mine.filter((b) => b.tipo === "real");
   const C = mineStats(cor), R = mineStats(real);
   const month = madridNow().date.slice(0, 7), Rm = mineStats(real.filter((b) => b.date.slice(0, 7) === month));
-  let h = `<h2>Mis apuestas</h2><p class="lead">Regístralas desde «Analizar mi apuesta» (pestaña Montador). Se resuelven solas. Así medimos tu intuición frente al mercado.</p>
+  const vb = vbankStats(), vlist = S.mine.filter((b) => b.tipo === "virtual");
+  let h = `<h2>Banca virtual</h2><div class="card"><div class="kpis"><div class="kpi"><b>${num(vb.bank)} €</b><span>Saldo (inicio ${num(vb.init, 0)} €)</span></div>
+   <div class="kpi"><b class="${cls(vb.pnl)}">${(vb.pnl > 0 ? "+" : "") + num(vb.pnl)} €</b><span>Beneficio</span></div>
+   <div class="kpi"><b>${vb.hits}/${vb.nd}</b><span>Acertadas</span></div><div class="kpi"><b>${num(vb.exp, 1)}</b><span>Aciertos que esperaba el mercado</span></div></div>
+   <div class="setting"><label for="vb_i">Saldo inicial de la banca virtual (€)</label><input id="vb_i" class="odds" type="number" min="10" step="10" value="${vb.init}" data-vbank inputmode="decimal"></div>
+   <p class="muted">Se apuesta desde la pestaña Apuestas › Apuestas del día. El importe se descuenta al apostar y, si gana, vuelve con el beneficio.</p></div>
+   <h2>Mis apuestas</h2><p class="lead">Regístralas desde «Analizar mi apuesta» (pestaña Montador). Se resuelven solas. Así medimos tu intuición frente al mercado.</p>
    <div class="card"><b>Corazonadas</b><div class="kpis">
     <div class="kpi"><b>${C.hits} / ${C.nd}</b><span>Acertadas / resueltas</span></div>
     <div class="kpi"><b>${num(C.expMkt, 1)}</b><span>Aciertos que esperaba el mercado</span></div>
@@ -970,9 +976,9 @@ function vMine() {
     <div class="kpi"><b class="${cls(R.pnl)}">${(R.pnl > 0 ? "+" : "") + num(R.pnl)} €</b><span>Total histórico</span></div>
     <div class="kpi"><b>${R.hits} / ${R.nd}</b><span>Acertadas / resueltas</span></div></div>
     ${Rm.staked > S.plan.budget ? `<p class="neg">Has superado el presupuesto del mes.</p>` : ""}</div>`;
-  const list = S.mine.slice(0, 40);
+  const list = S.mine.filter((b) => b.tipo !== "virtual").slice(0, 30).concat(vlist.slice(0, 30)).sort((x, y) => y.at.localeCompare(x.at));
   if (list.length) h += `<div class="card">${list.map((b) => `<div class="mk"><div class="row"><span class="teams">${esc(b.home)} – ${esc(b.away)}</span><span class="${b.status === "ganada" ? "pos" : b.status === "perdida" ? "neg" : "pen"}">${b.status === "pendiente" ? "pendiente" : (b.pnl > 0 ? "+" : "") + num(b.pnl) + " €"}</span></div>
-     <div class="muted">${b.tipo === "real" ? "💶 real" : "💡 corazonada"} · ${esc(b.label)} a ${num(b.o)} · ${num(b.stake)} € · ${esc(b.motivo)} · mercado ${pct(b.pmk)}${b.result ? " · " + b.result : ""}</div>
+     <div class="muted">${b.tipo === "real" ? "💶 real" : b.tipo === "virtual" ? "🎮 virtual" : "💡 corazonada"} · ${esc(b.label)} a ${num(b.o)} · ${num(b.stake)} € · ${esc(b.motivo)} · mercado ${pct(b.pmk)}${b.result ? " · " + b.result : ""}</div>
      <div class="btns"><button data-delmine="${b.id}">Borrar</button></div></div>`).join("")}</div>`;
   // plan del mes
   const pl = S.plan, opts = planOptions(+pl.budget || 100, +pl.target || 0, +pl.edge);
@@ -1053,24 +1059,89 @@ function pickCard(title, p, day, note) {
      <div class="row"><span class="muted">Valor esperado (modelo)</span><b class="${cls(p.EV)}">${spct(p.EV)}</b></div></div></div>
    <div class="muted" style="margin-top:4px">${esc(note)}</div></div>`;
 }
+// Si el simulador ya registró la apuesta de ese día, se muestra esa (fija); si no, la provisional calculada ahora.
+function fixedPick(key, day) {
+  const sim = S.serverSim || S.sim, d = sim && (sim[key] || []).find((x) => x.day === day);
+  if (!d) return null;
+  return {fixed: true, tipo: d.tipo, O: d.O, P: d.P, EV: d.EV, status: d.status,
+          legs: d.legs.map((l) => ({a: {f: {home: l.home, away: l.away}}, s: {label: l.label, o: l.o}}))};
+}
+/* ------------------------------------------------ apuestas del día con banca virtual */
+const QUICK = {stake: "5"};
+function vbankStats() {
+  const L = S.mine.filter((b) => b.tipo === "virtual"), init = +(S.plan.vbank || 100);
+  const done = L.filter((b) => b.status !== "pendiente"), pend = L.filter((b) => b.status === "pendiente");
+  const pnl = done.reduce((t, b) => t + (b.pnl || 0), 0), open = pend.reduce((t, b) => t + b.stake, 0);
+  return {init, pnl, open, avail: init + pnl - open, bank: init + pnl, n: L.length, nd: done.length, hits: done.filter((b) => b.status === "ganada").length,
+          exp: done.reduce((t, b) => t + (b.pmk || b.p || 0), 0), pend};
+}
+function dayPicks(day) {
+  const now = madridNow();
+  const ms = A.filter((a) => a.ok && a.f.date === day && a.conf !== "Baja" && !(a.f.date === now.date && a.f.time && a.f.time <= now.time));
+  const all = ms.flatMap((a) => a.sels.filter((x) => x.o && x.o >= 1.2 && ["1X2", "Doble", "Goles", "Ambos"].includes(x.grp) && !["O05", "U45"].includes(x.c)).map((s_) => ({a, s: s_})));
+  const onePer = (arr, n) => { const seen = new Set(), out = []; for (const v of arr) { if (seen.has(v.a.f.id)) continue; seen.add(v.a.f.id); out.push(v); if (out.length >= n) break; } return out; };
+  const byP = all.slice().sort((x, y) => y.s.p - x.s.p);
+  return {
+    segura: byP[0] || null,
+    valor: valuePicks().filter((v) => v.a.f.date === day),
+    probables: onePer(byP.filter((v) => v.s.o >= 1.3), 8),
+    pagadas: onePer(all.filter((v) => v.s.p >= 0.4).sort((x, y) => y.s.ev - x.s.ev), 6),
+    n: ms.length,
+  };
+}
+function quickRow(v, why) {
+  const {a, s: x} = v, on = S.mine.some((b) => b.tipo === "virtual" && b.fid === a.f.id && b.c === x.c);
+  return `<div class="mk"><div class="row"><span><b>${esc(x.label)}</b> · ${esc(a.f.home)} – ${esc(a.f.away)}</span><b style="font-size:17px">${num(x.o)}</b></div>
+   <div class="muted">${esc(LEAGUES[a.f.div] || a.f.div)} · ${esc(a.f.time)} · probabilidad ${pct(x.p)} · ${x.ev >= 0 ? `<span class="pos">EV ${spct(x.ev)}</span>` : `EV ${spct(x.ev)}`}${why ? " · " + esc(why) : ""}</div>
+   <div class="btns">${on ? `<span class="tag ok">Apostada en tu banca virtual</span>` : `<button class="primary" data-quick="${esc(a.f.id)}|${x.c}|${x.o}">Apostar ${num(+QUICK.stake || 0)} €</button>`}<button data-open="${esc(a.f.id)}">Ficha</button></div></div>`;
+}
+function todayCard() {
+  const days = [...new Set(A.filter((a) => a.ok && a.sels.some((x) => x.o)).map((a) => a.f.date))].sort();
+  const now = madridNow(), day = days.find((d) => d >= now.date && dayPicks(d).n) || null;
+  const vb = vbankStats();
+  let h = `<div class="card"><div class="row"><b>Tu banca virtual</b><span class="muted">inicio ${num(vb.init, 0)} €</span></div>
+   <div class="kpis"><div class="kpi"><b>${num(vb.avail)} €</b><span>Disponible</span></div><div class="kpi"><b>${num(vb.open)} €</b><span>En juego</span></div>
+   <div class="kpi"><b class="${cls(vb.pnl)}">${(vb.pnl > 0 ? "+" : "") + num(vb.pnl)} €</b><span>Beneficio</span></div><div class="kpi"><b>${vb.hits}/${vb.nd}</b><span>Acertadas (el mercado esperaba ${num(vb.exp, 1)})</span></div></div>
+   <div class="setting" style="margin-top:6px"><label for="q_s">Importe por apuesta (€)</label><input id="q_s" class="odds" type="number" min="0.5" step="0.5" value="${esc(QUICK.stake)}" data-quickstake inputmode="decimal"></div></div>`;
+  if (!day) return h + `<div class="card empty">No hay partidos con cuotas para hoy ni los próximos días.</div>`;
+  const P = dayPicks(day);
+  h += `<h2>Apuestas del día · ${fdate(day, {weekday: "long", day: "numeric", month: "short"})}</h2>`;
+  if (P.segura) h += `<div class="card"><div class="muted">🛡️ La más segura</div>${quickRow(P.segura, "la de mayor probabilidad con cuota de al menos 1,20")}</div>`;
+  h += `<div class="card"><div class="muted">✅ Recomendadas (tienen valor)</div>${P.valor.length ? P.valor.map((v) => quickRow(v, "paga más de lo que vale")).join("") : `<div class="empty">Hoy ninguna tiene valor según el radar. Abajo tienes las más probables y las mejor pagadas para que decidas tú.</div>`}</div>`;
+  h += `<div class="card"><div class="muted">🎯 Las más probables (una por partido)</div>${P.probables.map((v) => quickRow(v)).join("") || `<div class="empty">—</div>`}</div>`;
+  h += `<div class="card"><div class="muted">💰 Las mejor pagadas para su probabilidad</div>${P.pagadas.map((v) => quickRow(v, v.s.ev >= -0.02 ? "casi justa" : "")).join("") || `<div class="empty">—</div>`}
+   <p class="muted">Si el EV es negativo, a la larga la casa gana; cuanto más cerca de cero, menos pierdes.</p></div>`;
+  if (vb.pend.length) h += `<div class="card"><div class="muted">En juego en tu banca virtual</div>${vb.pend.map((b) => `<div class="mk"><div class="row"><span>${esc(b.label)} · ${esc(b.home)} – ${esc(b.away)}</span><span>${num(b.stake)} € a ${num(b.o)}</span></div><div class="muted">${fdate(b.date)} ${esc(b.time || "")} · si gana: +${num(b.stake * (b.o - 1))} €</div></div>`).join("")}</div>`;
+  return h;
+}
+async function quickBet(fid, c, o) {
+  const stake = parseFloat(String(QUICK.stake).replace(",", "."));
+  if (!(stake > 0)) { alert("Pon un importe."); return; }
+  const vb = vbankStats();
+  if (stake > vb.avail + 1e-9) { alert(`No te llega la banca virtual: tienes ${num(vb.avail)} € disponibles.`); return; }
+  const a = A.find((x) => x.f.id === fid), s_ = a && a.sels.find((x) => x.c === c); if (!s_) return;
+  S.mine.unshift({id: Date.now().toString(36), fid, div: a.f.div, date: a.f.date, time: a.f.time, home: a.f.home, away: a.f.away, c, label: s_.label,
+    o: +o, stake, tipo: "virtual", motivo: "apuestas del día", p: s_.p, pmk: s_.pmk, at: new Date().toISOString(), status: "pendiente"});
+  await Store.set("mine", S.mine); const y = window.scrollY; render(); window.scrollTo(0, y);
+}
 function dailyCard() {
   const day = nextPickDay();
   if (!day) return "";
-  const fav = favPick(day);
-  const favHtml = pickCard("Combinada de favoritos", fav, day, "Favoritos a cuota 1,20-1,40 hasta llegar a 2. " + EVIDENCIA.favoritas);
-  const p = dailyPick(day);
+  const fav = fixedPick("favs", day) || favPick(day);
+  const favHtml = pickCard("Combinada de favoritos", fav, day, (fav && fav.fixed ? "✅ Registrada por el simulador: ya no cambia. " : "⏳ Provisional hasta las 9:30 de ese día. ") + "Favoritos a cuota 1,20-1,40 hasta llegar a 2. " + EVIDENCIA.favoritas);
+  const p = fixedPick("daily", day) || dailyPick(day);
   if (!p) return `<div class="card"><div class="muted">Apuesta del día (${fdate(day)})</div><div class="empty">Sin opciones con cuota ≥ 2 y datos suficientes.</div></div>`;
   return `<div class="card"><div class="row"><span class="muted">Apuesta del día · ${fdate(day, {weekday: "long", day: "numeric", month: "short"})}</span><span class="tag">${esc(p.tipo)}</span></div>
    <div style="display:flex;gap:12px;align-items:center;margin-top:6px">${ring(p.P, 1 / p.O)}
     <div style="flex:1">${p.legs.map(({a, s}) => `<div><b>${esc(s.label)}</b> <span class="muted">· ${esc(a.f.home)} – ${esc(a.f.away)} · ${num(s.o)}</span></div>`).join("")}
      <div class="row" style="margin-top:4px"><span class="muted">Cuota total</span><b style="font-size:20px">${num(p.O)}</b></div>
      <div class="row"><span class="muted">Valor esperado</span><b class="${cls(p.EV)}">${spct(p.EV)}</b></div></div></div>
-   <div class="muted" style="margin-top:4px">La opción más probable del día con cuota de 2 o más (probabilidad ${pct(p.P)}). Es un experimento: ${esc(EVIDENCIA.diaria)}</div></div>` + favHtml;
+   <div class="muted" style="margin-top:4px">${p.fixed ? `✅ Registrada por el simulador esta mañana (${esc(p.status)}): ya no cambia.` : "⏳ Provisional: se fija en la actualización de las 9:30 de ese día y hasta entonces puede cambiar con las cuotas."} La opción más probable del día con cuota de 2 o más (probabilidad ${pct(p.P)}). ${esc(EVIDENCIA.diaria)}</div></div>` + favHtml;
 }
 function vVisual() {
   const picks = valuePicks();
   const ok = A.filter((a) => a.ok);
-  let h = staleBanner() + dailyCard();
+  let h = staleBanner() + todayCard() + `<h2>Sistemas automáticos del simulador</h2>` + dailyCard();
   if (picks.length) {
     const tot = picks.reduce((s, v) => s + v.s.stake, 0), exp = picks.reduce((s, v) => s + v.s.stake * v.s.ev, 0);
     h += `<div class="card"><div class="muted">Apuestas recomendadas con las cuotas cargadas</div><div class="big">${picks.length}</div>
@@ -1569,7 +1640,13 @@ function vSim() {
   if (!sim) return "";
   const st = simStats(sim);
   const origin = S.serverSim ? "automático: lo ejecuta la tarea diaria de GitHub" : "en este navegador: apuesta al abrir el radar";
-  let h = `<p class="lead">Cada apuesta que el radar marca «con valor» se registra sola con su cuota y el stake sugerido, una por partido y sin modificarla después. Todo es dinero ficticio (${origin}).</p>
+  const sysPnl = (L) => (L || []).filter((d) => d.status !== "pendiente").reduce((t, d) => t + (d.pnl || 0), 0);
+  const parts = [["Con valor", st.pnl], ["Apuesta del día", sysPnl(sim.daily)], ["Combinada de favoritos", sysPnl(sim.favs)], ["Laboratorio de favoritos", sysPnl(sim.favSingles)]];
+  const total = parts.reduce((t, x) => t + x[1], 0);
+  let h = `<div class="card"><div class="muted">Resultado de todos los sistemas simulados</div><div class="big ${cls(total)}">${(total > 0 ? "+" : "") + num(total)} €</div>
+   <div class="scroll"><table>${parts.map(([n, v]) => `<tr><td>${n}</td><td class="${cls(v)}" style="text-align:right">${(v > 0 ? "+" : "") + num(v)} €</td></tr>`).join("")}</table></div>
+   <p class="muted">«Saldo simulado» de abajo es solo el sistema de apuestas con valor, que apuesta muy poco desde la calibración porque casi nunca encuentra cuotas por encima del mercado.</p></div>
+   <p class="lead">Cada apuesta que el radar marca «con valor» se registra sola con su cuota y el stake sugerido, una por partido y sin modificarla después. Todo es dinero ficticio (${origin}).</p>
    <div class="card"><div class="muted">Saldo simulado</div><div class="big ${cls(st.pnl)}">${num(st.bank)} €</div>
    <div class="kpis"><div class="kpi"><b class="${cls(st.pnl)}">${(st.pnl > 0 ? "+" : "") + num(st.pnl)} €</b><span>Resultado (inicio ${num(sim.bank0, 0)} €)</span></div>
    <div class="kpi"><b>${st.yield == null ? "—" : spct(st.yield)}</b><span>Yield (beneficio / apostado)</span></div>
@@ -1674,13 +1751,14 @@ function render() {
 
 /* ------------------------------------------------ eventos */
 if (HAS_DOM) document.addEventListener("click", async (e) => {
-  const t = e.target.closest("[data-register],[data-delmine],[data-pick],#combobar,[data-open],[data-back],[data-follow],[data-combo],[data-rmcombo],[data-clearcombo],[data-cleartrack],[data-resetsim],[data-build],[data-analyze],[data-usecombo],#up,#clear,#saveset,#resetset,nav button");
+  const t = e.target.closest("[data-quick],[data-register],[data-delmine],[data-pick],#combobar,[data-open],[data-back],[data-follow],[data-combo],[data-rmcombo],[data-clearcombo],[data-cleartrack],[data-resetsim],[data-build],[data-analyze],[data-usecombo],#up,#clear,#saveset,#resetset,nav button");
   if (!t) return;
   if (t.matches("nav button")) { view = t.dataset.v; detail = null; render(); window.scrollTo(0, 0); return; }
   if (t.dataset.open) { detail = t.dataset.open; render(); window.scrollTo(0, 0); return; }
   if (t.hasAttribute("data-back")) { detail = null; render(); return; }
   if (t.dataset.follow) { const [i, ...r] = t.dataset.follow.split("|"); const c = r.pop(); await follow([i, ...r].join("|"), c); return; }
   if (t.dataset.combo) { const p = t.dataset.combo.split("|"); const c = p.pop(); await addCombo(p.join("|"), c); return; }
+  if (t.dataset.quick) { const p = t.dataset.quick.split("|"), o = p.pop(), c = p.pop(); await quickBet(p.join("|"), c, o); return; }
   if (t.dataset.register) {
     const p = t.dataset.register.split("|"), o = parseFloat(p.pop()), c = p.pop(), fid = p.join("|");
     await registerBet(fid, c, isFinite(o) ? o : null); alert("Registrada en Simulador › Mis apuestas"); return;
@@ -1726,6 +1804,8 @@ if (HAS_DOM) document.addEventListener("click", async (e) => {
 if (HAS_DOM) document.addEventListener("change", async (e) => {
   const el = e.target;
   if (el.dataset && el.dataset.reg) { REG[el.dataset.reg] = el.value; return; }
+  if (el.dataset && "quickstake" in el.dataset) { QUICK.stake = el.value; const y = window.scrollY; render(); window.scrollTo(0, y); return; }
+  if (el.dataset && el.dataset.vbank != null) { S.plan.vbank = +el.value || 100; await Store.set("plan", S.plan); render(); return; }
   if (el.dataset && el.dataset.plan) { S.plan[el.dataset.plan] = el.dataset.plan === "edge" ? +el.value : +el.value; await Store.set("plan", S.plan); const y = window.scrollY; render(); window.scrollTo(0, y); return; }
   if (el.dataset && el.dataset.pf) { PF[el.dataset.pf] = el.value; if (el.dataset.pf === "country") PF.div = ""; render(); return; }
   if (el.dataset && el.dataset.ui) { UI[el.dataset.ui] = el.type === "checkbox" ? el.checked : el.value; return; }
