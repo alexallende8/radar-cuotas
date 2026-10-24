@@ -551,7 +551,7 @@ const EVIDENCIA = {
   duelo: "El cruce «racha de victorias contra racha de derrotas» es muy raro (42 casos con 3+ y solo 1 con 5+ en tres temporadas) y no ha superado al mercado.",
   goles: "Seguir la tendencia de goles ha salido mal: con dos equipos «over», el más de 2,5 salió un 55 % cuando el mercado esperaba un 59 % (-13 % apostando); con dos equipos «under», el menos de 2,5 salió un 47 % frente al 56 % esperado (-22 %). Las rachas de goles tienden a cortarse.",
   favoritas: "En tu histórico (72 días), la combinada de favoritos a 1,20-1,40 hasta cuota 2 acertó el 58 % y ganó un 32 %, pero el margen de error es de ±26 puntos: con tan pocos días puede ser suerte. Lo que sí es conocido es que los favoritos claros suelen estar mejor pagados que las cuotas altas (sesgo favorito-sorpresa).",
-  diaria: "En el histórico, la apuesta más probable con cuota ≥ 2 acertó el 46 % de los días (simples) y el 43 % (combinadas), justo lo esperado, con una pérdida del 4-5 %: el margen de la casa."
+  diaria: "Solo con partidos de las 5 grandes ligas, Champions y Europa League. En el histórico de 22 ligas, este sistema perdía un 11 % usando todas las ligas y un 2 % usando solo las grandes, porque en las ligas menores las casas cobran más margen."
 };
 
 function contextTags(f, tb) {
@@ -757,8 +757,11 @@ function findResult(div, home, away, date) {
 }
 
 /* ------------------------------------------------ apuesta del día: la más probable con cuota >= 2 */
+/* Desde el 23/10: solo grandes ligas y Champions/Europa League. En el histórico (596 días, 22 ligas) la
+   apuesta del día con todas las ligas perdía un 11 %; con las 5 grandes, un 2 % (las casas cobran más margen en ligas menores). */
+const DAILY_LEAGUES = new Set(["E0", "SP1", "D1", "I1", "F1", "UCL", "UEL"]);
 function dailyPick(day) {
-  const ms = A.filter((a) => a.ok && a.f.date === day && a.conf !== "Baja");
+  const ms = A.filter((a) => a.ok && a.f.date === day && a.conf !== "Baja" && DAILY_LEAGUES.has(a.f.div));
   const singles = [], legs = [];
   for (const a of ms) {
     const opts = a.sels.filter((s) => s.o && !s.typed && ["H", "D", "A", "O25", "U25"].includes(s.c));
@@ -1130,7 +1133,7 @@ function dailyCard() {
   const fav = fixedPick("favs", day) || favPick(day);
   const favHtml = pickCard("Combinada de favoritos", fav, day, (fav && fav.fixed ? "✅ Registrada por el simulador: ya no cambia. " : "⏳ Provisional hasta las 9:30 de ese día. ") + "Favoritos a cuota 1,20-1,40 hasta llegar a 2. " + EVIDENCIA.favoritas);
   const p = fixedPick("daily", day) || dailyPick(day);
-  if (!p) return `<div class="card"><div class="muted">Apuesta del día (${fdate(day)})</div><div class="empty">Sin opciones con cuota ≥ 2 y datos suficientes.</div></div>`;
+  if (!p) return `<div class="card"><div class="muted">Apuesta del día (${fdate(day)})</div><div class="empty">Ese día no hay partidos de las 5 grandes ligas, Champions o Europa League con cuota de 2 o más.</div></div>` + favHtml;
   return `<div class="card"><div class="row"><span class="muted">Apuesta del día · ${fdate(day, {weekday: "long", day: "numeric", month: "short"})}</span><span class="tag">${esc(p.tipo)}</span></div>
    <div style="display:flex;gap:12px;align-items:center;margin-top:6px">${ring(p.P, 1 / p.O)}
     <div style="flex:1">${p.legs.map(({a, s}) => `<div><b>${esc(s.label)}</b> <span class="muted">· ${esc(a.f.home)} – ${esc(a.f.away)} · ${num(s.o)}</span></div>`).join("")}
@@ -1141,7 +1144,7 @@ function dailyCard() {
 function vVisual() {
   const picks = valuePicks();
   const ok = A.filter((a) => a.ok);
-  let h = staleBanner() + todayCard() + `<h2>Sistemas automáticos del simulador</h2>` + dailyCard();
+  let h = staleBanner() + `<h2>⭐ Apuesta del día (la más probable a cuota 2 o más)</h2>` + dailyCard() + todayCard();
   if (picks.length) {
     const tot = picks.reduce((s, v) => s + v.s.stake, 0), exp = picks.reduce((s, v) => s + v.s.stake * v.s.ev, 0);
     h += `<div class="card"><div class="muted">Apuestas recomendadas con las cuotas cargadas</div><div class="big">${picks.length}</div>
