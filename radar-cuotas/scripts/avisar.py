@@ -74,6 +74,12 @@ def build(sim: dict, feed: dict, now: datetime) -> tuple[str, str]:
     if res:
         h.append("<h3>Resultados recientes</h3><ul>" + "".join(res) + "</ul>")
 
+    init = sim.get("bank0", 300)
+    auto = [x for k in ("bets", "daily", "favs") for x in sim.get(k, [])]
+    pnl_auto = sum(x.get("pnl") or 0 for x in auto if x.get("status") in ("ganada", "perdida"))
+    open_auto = sum(x.get("stake", 0) for x in auto if x.get("status") == "pendiente")
+    h.append(f"<h3>💰 Banca automática: {init + pnl_auto:.2f} € ({eur(pnl_auto)})</h3>".replace(".", ",", 1)
+             + f"<p>Empezó con {init} € ficticios · en juego ahora {open_auto:.2f} €".replace(".", ",") + "</p>")
     h.append("<h3>Cómo va cada sistema</h3><ul>")
     h.append(system_line("Apuestas con valor", sim.get("bets", [])))
     h.append(system_line("Apuesta del día", sim.get("daily", [])))
