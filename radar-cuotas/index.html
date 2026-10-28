@@ -877,6 +877,20 @@ function simSettle(sim) {
     b.pnl = won ? Math.round(b.stake * (b.o - 1) * 100) / 100 : -b.stake; b.settledAt = new Date().toISOString();
   }
 }
+function autoBank(sim) {
+  const ev = [];
+  for (const b of sim.bets || []) ev.push({d: b.date, stake: b.stake, pnl: b.pnl, st: b.status, sys: "Con valor"});
+  for (const d of sim.daily || []) ev.push({d: d.day, stake: d.stake, pnl: d.pnl, st: d.status, sys: "Apuesta del día"});
+  for (const d of sim.favs || []) ev.push({d: d.day, stake: d.stake, pnl: d.pnl, st: d.status, sys: "Combinada de favoritos"});
+  const init = sim.bank0 || 300, done = ev.filter((e) => e.st !== "pendiente").sort((x, y) => x.d.localeCompare(y.d));
+  const pnl = done.reduce((t, e) => t + (e.pnl || 0), 0), open = ev.filter((e) => e.st === "pendiente").reduce((t, e) => t + e.stake, 0);
+  let bank = init; const curve = [{fecha: (sim.creado || "").slice(0, 10), bank}];
+  for (const e of done) { bank += e.pnl || 0; curve.push({fecha: e.d, bank}); }
+  const by = {};
+  for (const e of done) { const g = (by[e.sys] ||= {n: 0, w: 0, staked: 0, pnl: 0}); g.n++; g.w += e.st === "ganada" ? 1 : 0; g.staked += e.stake; g.pnl += e.pnl || 0; }
+  return {init, pnl, open, bank: init + pnl, avail: init + pnl - open, curve, by, n: ev.length, nd: done.length,
+          staked: done.reduce((t, e) => t + e.stake, 0)};
+}
 function simStats(sim) {
   const st = sim.bets.filter((b) => b.status !== "pendiente"), pend = sim.bets.filter((b) => b.status === "pendiente");
   const pnl = st.reduce((s, b) => s + b.pnl, 0), staked = st.reduce((s, b) => s + b.stake, 0);
@@ -1144,7 +1158,9 @@ function dailyCard() {
 function vVisual() {
   const picks = valuePicks();
   const ok = A.filter((a) => a.ok);
-  let h = staleBanner() + `<h2>⭐ Apuesta del día (la más probable a cuota 2 o más)</h2>` + dailyCard() + todayCard();
+  const ABk = autoBank(S.serverSim || S.sim || {bets: []});
+  let h = staleBanner() + `<div class="card row tap" data-gosim style="align-items:center"><span>💰 Banca automática <span class="muted">(ficticia)</span></span><span><b class="${cls(ABk.pnl)}" style="font-size:18px">${num(ABk.bank)} €</b> <span class="muted">${(ABk.pnl > 0 ? "+" : "") + num(ABk.pnl)} € · en juego ${num(ABk.open)} €</span></span></div>` +
+    `<h2>⭐ Apuesta del día (la más probable a cuota 2 o más)</h2>` + dailyCard() + todayCard();
   if (picks.length) {
     const tot = picks.reduce((s, v) => s + v.s.stake, 0), exp = picks.reduce((s, v) => s + v.s.stake * v.s.ev, 0);
     h += `<div class="card"><div class="muted">Apuestas recomendadas con las cuotas cargadas</div><div class="big">${picks.length}</div>
@@ -1643,14 +1659,19 @@ function vSim() {
   if (!sim) return "";
   const st = simStats(sim);
   const origin = S.serverSim ? "automático: lo ejecuta la tarea diaria de GitHub" : "en este navegador: apuesta al abrir el radar";
-  const sysPnl = (L) => (L || []).filter((d) => d.status !== "pendiente").reduce((t, d) => t + (d.pnl || 0), 0);
-  const parts = [["Con valor", st.pnl], ["Apuesta del día", sysPnl(sim.daily)], ["Combinada de favoritos", sysPnl(sim.favs)], ["Laboratorio de favoritos", sysPnl(sim.favSingles)]];
-  const total = parts.reduce((t, x) => t + x[1], 0);
-  let h = `<div class="card"><div class="muted">Resultado de todos los sistemas simulados</div><div class="big ${cls(total)}">${(total > 0 ? "+" : "") + num(total)} €</div>
-   <div class="scroll"><table>${parts.map(([n, v]) => `<tr><td>${n}</td><td class="${cls(v)}" style="text-align:right">${(v > 0 ? "+" : "") + num(v)} €</td></tr>`).join("")}</table></div>
-   <p class="muted">«Saldo simulado» de abajo es solo el sistema de apuestas con valor, que apuesta muy poco desde la calibración porque casi nunca encuentra cuotas por encima del mercado.</p></div>
+  const AB = autoBank(sim), lab = (sim.favSingles || []).filter((d) => d.status !== "pendiente"), labPnl = lab.reduce((t, d) => t + (d.pnl || 0), 0);
+  let h = `<div class="card"><div class="muted">💰 Banca automática (dinero ficticio)</div><div class="big ${cls(AB.pnl)}">${num(AB.bank)} €</div>
+   <div class="kpis"><div class="kpi"><b class="${cls(AB.pnl)}">${(AB.pnl > 0 ? "+" : "") + num(AB.pnl)} €</b><span>Resultado (inicio ${num(AB.init, 0)} €)</span></div>
+   <div class="kpi"><b>${num(AB.open)} €</b><span>En juego ahora</span></div>
+   <div class="kpi"><b>${num(AB.staked)} €</b><span>Apostado ya resuelto</span></div>
+   <div class="kpi"><b>${AB.staked ? spct(AB.pnl / AB.staked) : "—"}</b><span>Rentabilidad</span></div></div>
+   <div style="margin-top:8px">${simCurve(AB.curve.map((c) => ({fecha: c.fecha, bank: c.bank})))}</div>
+   <div class="scroll"><table><tr><th>Sistema</th><th>Apuesta</th><th>Acertadas</th><th>Apostado</th><th>Resultado</th></tr>
+   ${[["Apuesta del día", "5 € fijos"], ["Combinada de favoritos", "5 € fijos"], ["Con valor", "según ventaja"]].map(([k, st_]) => { const g = AB.by[k] || {n: 0, w: 0, staked: 0, pnl: 0};
+      return `<tr><td>${k}</td><td>${st_}</td><td>${g.w}/${g.n}</td><td>${num(g.staked)} €</td><td class="${cls(g.pnl)}">${(g.pnl > 0 ? "+" : "") + num(g.pnl)} €</td></tr>`; }).join("")}</table></div>
+   <p class="muted">Cada día, en la actualización de las 9:30, el simulador apuesta solo: 5 € a la apuesta del día, 5 € a la combinada de favoritos (si ese día existe) y lo que toque a las apuestas con valor. Se liquida sola con los resultados. Aparte, el laboratorio de favoritos sueltos (2 € cada uno) lleva ${(labPnl > 0 ? "+" : "") + num(labPnl)} € y no cuenta en esta banca.</p></div>
    <p class="lead">Cada apuesta que el radar marca «con valor» se registra sola con su cuota y el stake sugerido, una por partido y sin modificarla después. Todo es dinero ficticio (${origin}).</p>
-   <div class="card"><div class="muted">Saldo simulado</div><div class="big ${cls(st.pnl)}">${num(st.bank)} €</div>
+   <div class="card"><div class="muted">Sistema «con valor» (stake según ventaja)</div><div class="big ${cls(st.pnl)}">${num(st.bank)} €</div>
    <div class="kpis"><div class="kpi"><b class="${cls(st.pnl)}">${(st.pnl > 0 ? "+" : "") + num(st.pnl)} €</b><span>Resultado (inicio ${num(sim.bank0, 0)} €)</span></div>
    <div class="kpi"><b>${st.yield == null ? "—" : spct(st.yield)}</b><span>Yield (beneficio / apostado)</span></div>
    <div class="kpi"><b>${st.nSet} · ${st.nPend}</b><span>Resueltas · pendientes</span></div>
@@ -1696,7 +1717,7 @@ function vSeguir() {
   const t = S.track; const st = t.filter((x) => x.status !== "pendiente");
   const pnl = st.reduce((s, x) => s + x.pnl, 0), expP = st.reduce((s, x) => s + x.p, 0), hits = st.filter((x) => x.status === "ganada").length;
   const eur = st.reduce((s, x) => s + (x.stake || 0) * x.pnl, 0);
-  let h = vMine() + vSim() + `<p class="lead">Registro de las selecciones que marcas con «Seguir», a 1 € por apuesta y sin dinero real. Se resuelven solas cuando subes un CSV con los resultados.</p>
+  let h = vSim() + vMine() + `<p class="lead">Registro de las selecciones que marcas con «Seguir», a 1 € por apuesta y sin dinero real. Se resuelven solas cuando subes un CSV con los resultados.</p>
    <div class="card"><div class="kpis"><div class="kpi"><b>${t.length}</b><span>Seguidas</span></div><div class="kpi"><b>${st.length}</b><span>Resueltas</span></div>
    <div class="kpi"><b class="${cls(pnl)}">${num(pnl)} u</b><span>Resultado</span></div><div class="kpi"><b>${st.length ? spct(pnl / st.length) : "—"}</b><span>Yield</span></div>
    <div class="kpi"><b>${hits} / ${num(expP, 1)}</b><span>Aciertos reales / esperados</span></div>
@@ -1754,13 +1775,14 @@ function render() {
 
 /* ------------------------------------------------ eventos */
 if (HAS_DOM) document.addEventListener("click", async (e) => {
-  const t = e.target.closest("[data-quick],[data-register],[data-delmine],[data-pick],#combobar,[data-open],[data-back],[data-follow],[data-combo],[data-rmcombo],[data-clearcombo],[data-cleartrack],[data-resetsim],[data-build],[data-analyze],[data-usecombo],#up,#clear,#saveset,#resetset,nav button");
+  const t = e.target.closest("[data-gosim],[data-quick],[data-register],[data-delmine],[data-pick],#combobar,[data-open],[data-back],[data-follow],[data-combo],[data-rmcombo],[data-clearcombo],[data-cleartrack],[data-resetsim],[data-build],[data-analyze],[data-usecombo],#up,#clear,#saveset,#resetset,nav button");
   if (!t) return;
   if (t.matches("nav button")) { view = t.dataset.v; detail = null; render(); window.scrollTo(0, 0); return; }
   if (t.dataset.open) { detail = t.dataset.open; render(); window.scrollTo(0, 0); return; }
   if (t.hasAttribute("data-back")) { detail = null; render(); return; }
   if (t.dataset.follow) { const [i, ...r] = t.dataset.follow.split("|"); const c = r.pop(); await follow([i, ...r].join("|"), c); return; }
   if (t.dataset.combo) { const p = t.dataset.combo.split("|"); const c = p.pop(); await addCombo(p.join("|"), c); return; }
+  if (t.hasAttribute("data-gosim")) { view = "seguir"; detail = null; render(); window.scrollTo(0, 0); return; }
   if (t.dataset.quick) { const p = t.dataset.quick.split("|"), o = p.pop(), c = p.pop(); await quickBet(p.join("|"), c, o); return; }
   if (t.dataset.register) {
     const p = t.dataset.register.split("|"), o = parseFloat(p.pop()), c = p.pop(), fid = p.join("|");
